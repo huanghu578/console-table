@@ -11,12 +11,7 @@ homepage = "https://github.com/huanghu578/console-table"
 documentation = "https://docs.rs/console-table"
 keywords = ["table", "console", "terminal", "unicode", "cjk"]
 categories = ["command-line-interface", "text-processing"]
-exclude = [
-    "/.github",
-    "/.gitignore",
-    "/examples/screenshots",
-    "/CHANGELOG.md",
-]
+exclude = [".github", "examples/screenshots", "CHANGELOG.md", "sync.bat"]
 
 [dependencies]
 unicode-width = "0.1"
