@@ -1,0 +1,27 @@
+[package]
+name = "console-table"
+version = "0.1.0"
+edition = "2021"
+description = "Console table rendering with Unicode/CJK-aware alignment, truncation, and ANSI color support"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+rust-version = "1.70"
+repository = "https://github.com/huanghu578/console-table"
+homepage = "https://github.com/huanghu578/console-table"
+documentation = "https://docs.rs/console-table"
+keywords = ["table", "console", "terminal", "unicode", "cjk"]
+categories = ["command-line-interface", "text-processing"]
+exclude = [
+    "/.github",
+    "/.gitignore",
+    "/examples/screenshots",
+    "/CHANGELOG.md",
+]
+
+[dependencies]
+unicode-width = "0.1"
+
+[dev-dependencies]
+
+[package.metadata.docs.rs]
+all-features = true
