@@ -22,6 +22,7 @@
 #![warn(missing_docs)]
 
 use unicode_width::UnicodeWidthStr;
+use ndarray::Array2;
 
 // ============================================================
 // Public types
@@ -329,6 +330,20 @@ impl Table {
             }
         }
         out
+    }
+}
+
+impl Table {
+    /// Convert an `ndarray::Array2<String>` into the row-major
+    /// `Vec<Vec<String>>` representation used by [`Table::new`].
+    ///
+    /// Each row of the array becomes one `Vec<String>`, preserving the
+    /// array's row/column order.
+    pub fn from_array2(array: Array2<String>) -> Vec<Vec<String>> {
+        array
+            .outer_iter()
+            .map(|row| row.iter().cloned().collect())
+            .collect()
     }
 }
 
