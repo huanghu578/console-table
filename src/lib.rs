@@ -112,6 +112,7 @@ impl Color {
             Color::BrightWhite => 97,
         }
     }
+
 }
 
 /// Table configuration.
@@ -130,8 +131,8 @@ pub struct Table {
 }
 
 impl Table {
-    /// Create a table from `rows`. The first row is treated as the header.
-    ///
+    /// Create a table from `rows`. 
+    /// The first row is treated as the header.
     /// Rows may have different lengths; missing cells are treated as empty.
     pub fn new(rows: Vec<Vec<String>>) -> Self {
         Self {
@@ -143,7 +144,16 @@ impl Table {
             body_color: None,
         }
     }
-
+    /// Create a table from an `ndarray::Array2<String>`. 
+    /// The first row is treated as the header.
+    /// Rows may have different lengths; missing cells are treated as empty.    
+    pub fn from_array2(array: Array2<String>) -> Self {
+        let rows = array
+            .outer_iter()
+            .map(|row| row.iter().cloned().collect())
+            .collect();
+        new(rows)    
+    }
     /// Set the border style. Default is [`Style::Simple`].
     pub fn style(mut self, style: Style) -> Self {
         self.style = style;
@@ -175,6 +185,53 @@ impl Table {
         self
     }
 
+    /// Render the table to a `String`. Every line ends with `\n`.
+    pub fn render(&self) -> String {
+        if self.rows.is_empty() {
+            return String::new();
+        }
+        let widths = self.column_widths();
+        let mut out = String::new();
+
+        match self.style {
+            Style::Simple => {
+                out.push('│');
+                out.push_str(&self.render_row(&self.rows[0], &widths, true));
+                out.push_str("│\n");
+                out.push_str(&Self::horizontal(&widths, "├", "┼", "┤", "─"));
+                out.push('\n');
+                for row in &self.rows[1..] {
+                    out.push('│');
+                    out.push_str(&self.render_row(row, &widths, false));
+                    out.push_str("│\n");
+                }
+            }
+            Style::Boxed => {
+                out.push_str(&Self::horizontal(&widths, "┌", "┬", "┐", "─"));
+                out.push('\n');
+                out.push('│');
+                out.push_str(&self.render_row(&self.rows[0], &widths, true));
+                out.push_str("│\n");
+                out.push_str(&Self::horizontal(&widths, "├", "┼", "┤", "─"));
+                out.push('\n');
+                for (i, row) in self.rows[1..].iter().enumerate() {
+                    out.push('│');
+                    out.push_str(&self.render_row(row, &widths, false));
+                    out.push_str("│\n");
+                    if i + 1 < self.rows.len() - 1 {
+                        out.push_str(&Self::horizontal(&widths, "├", "┼", "┤", "─"));
+                        out.push('\n');
+                    }
+                }
+                out.push_str(&Self::horizontal(&widths, "└", "┴", "┘", "─"));
+                out.push('\n');
+            }
+        }
+        out
+    }
+}
+
+impl Table {
     fn align_of(&self, col: usize) -> Align {
         self.aligns.get(col).copied().unwrap_or(Align::Left)
     }
@@ -285,65 +342,6 @@ impl Table {
     fn horizontal(widths: &[usize], left: &str, mid: &str, right: &str, fill: &str) -> String {
         let segments: Vec<String> = widths.iter().map(|w| fill.repeat(*w)).collect();
         format!("{}{}{}", left, segments.join(mid), right)
-    }
-
-    /// Render the table to a `String`. Every line ends with `\n`.
-    pub fn render(&self) -> String {
-        if self.rows.is_empty() {
-            return String::new();
-        }
-        let widths = self.column_widths();
-        let mut out = String::new();
-
-        match self.style {
-            Style::Simple => {
-                out.push('│');
-                out.push_str(&self.render_row(&self.rows[0], &widths, true));
-                out.push_str("│\n");
-                out.push_str(&Self::horizontal(&widths, "├", "┼", "┤", "─"));
-                out.push('\n');
-                for row in &self.rows[1..] {
-                    out.push('│');
-                    out.push_str(&self.render_row(row, &widths, false));
-                    out.push_str("│\n");
-                }
-            }
-            Style::Boxed => {
-                out.push_str(&Self::horizontal(&widths, "┌", "┬", "┐", "─"));
-                out.push('\n');
-                out.push('│');
-                out.push_str(&self.render_row(&self.rows[0], &widths, true));
-                out.push_str("│\n");
-                out.push_str(&Self::horizontal(&widths, "├", "┼", "┤", "─"));
-                out.push('\n');
-                for (i, row) in self.rows[1..].iter().enumerate() {
-                    out.push('│');
-                    out.push_str(&self.render_row(row, &widths, false));
-                    out.push_str("│\n");
-                    if i + 1 < self.rows.len() - 1 {
-                        out.push_str(&Self::horizontal(&widths, "├", "┼", "┤", "─"));
-                        out.push('\n');
-                    }
-                }
-                out.push_str(&Self::horizontal(&widths, "└", "┴", "┘", "─"));
-                out.push('\n');
-            }
-        }
-        out
-    }
-}
-
-impl Table {
-    /// Convert an `ndarray::Array2<String>` into the row-major
-    /// `Vec<Vec<String>>` representation used by [`Table::new`].
-    ///
-    /// Each row of the array becomes one `Vec<String>`, preserving the
-    /// array's row/column order.
-    pub fn from_array2(array: Array2<String>) -> Vec<Vec<String>> {
-        array
-            .outer_iter()
-            .map(|row| row.iter().cloned().collect())
-            .collect()
     }
 }
 
