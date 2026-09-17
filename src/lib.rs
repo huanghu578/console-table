@@ -152,7 +152,7 @@ impl Table {
             .outer_iter()
             .map(|row| row.iter().cloned().collect())
             .collect();
-        new(rows)    
+        Self::new(rows)    
     }
     /// Set the border style. Default is [`Style::Simple`].
     pub fn style(mut self, style: Style) -> Self {
