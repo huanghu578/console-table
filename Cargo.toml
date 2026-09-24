@@ -1,6 +1,6 @@
 [package]
 name = "console-table"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 description = "Console table rendering with Unicode/CJK-aware alignment, truncation, and ANSI color support"
 license = "MIT OR Apache-2.0"
