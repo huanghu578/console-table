@@ -21,8 +21,8 @@
 
 #![warn(missing_docs)]
 
-use unicode_width::UnicodeWidthStr;
 use ndarray::Array2;
+use unicode_width::UnicodeWidthChar;
 
 // ============================================================
 // Public types
@@ -112,7 +112,6 @@ impl Color {
             Color::BrightWhite => 97,
         }
     }
-
 }
 
 /// Table configuration.
@@ -131,7 +130,7 @@ pub struct Table {
 }
 
 impl Table {
-    /// Create a table from `rows`. 
+    /// Create a table from `rows`.
     /// The first row is treated as the header.
     /// Rows may have different lengths; missing cells are treated as empty.
     pub fn new(rows: Vec<Vec<String>>) -> Self {
@@ -144,16 +143,18 @@ impl Table {
             body_color: None,
         }
     }
-    /// Create a table from an `ndarray::Array2<String>`. 
+
+    /// Create a table from an `ndarray::Array2<String>`.
     /// The first row is treated as the header.
-    /// Rows may have different lengths; missing cells are treated as empty.    
+    /// Rows may have different lengths; missing cells are treated as empty.
     pub fn from_array2(array: Array2<String>) -> Self {
         let rows = array
             .outer_iter()
             .map(|row| row.iter().cloned().collect())
             .collect();
-        Self::new(rows)    
+        Self::new(rows)
     }
+
     /// Set the border style. Default is [`Style::Simple`].
     pub fn style(mut self, style: Style) -> Self {
         self.style = style;
@@ -243,16 +244,17 @@ impl Table {
 
     /// Prepare a cell for rendering.
     ///
-    /// Steps: strip ANSI escape sequences, then truncate to
-    /// `max_cell_width`. Returns `(final_text, display_width)`.
+    /// Steps: strip ANSI escape sequences, trim surrounding whitespace,
+    /// then truncate to `max_cell_width`. Returns `(final_text, display_width)`.
     ///
     /// Both width computation and rendering call this, so they always see
     /// the same content.
     fn prepare_cell(&self, content: &str) -> (String, usize) {
         let stripped = strip_ansi(content);
+        let trimmed = stripped.trim();
         let truncated = match self.max_cell_width {
-            Some(max) => truncate_visible(&stripped, max),
-            None => stripped,
+            Some(max) => truncate_visible(trimmed, max),
+            None => trimmed.to_string(),
         };
         let w = display_width(&truncated);
         (truncated, w)
@@ -366,10 +368,40 @@ fn colorize(s: &str, color: Option<Color>) -> String {
 // Width
 // ============================================================
 
+/// Characters that the current terminal renders as 2 columns, but
+/// `unicode_width` counts as 1 (even with `width_cjk`).
+///
+/// `Φ` (U+03A6) is the motivating example: `unicode_width` gives it width 1,
+/// but CJK terminals render it 2 columns wide, causing misalignment.
+/// Extend this list as new such characters appear in real data.
+fn extra_wide(c: char) -> bool {
+    matches!(
+        c,
+        'Φ' | 'φ'                 // 希腊字母 Phi
+        | 'Ⅱ' | 'Ⅲ' | 'Ⅰ'       // 罗马数字
+        | '±' | '×' | '÷'        // 数学符号
+        | '≤' | '≥' | '≠'
+        | '→' | '←' | '↑' | '↓'
+        | '①'..='⑳'             // 带圈数字
+    )
+}
+
+/// Display width of a single `char`, with [`extra_wide`] compensation.
+fn char_width(c: char) -> usize {
+    if extra_wide(c) {
+        2
+    } else {
+        UnicodeWidthChar::width(c).unwrap_or(0)
+    }
+}
+
 /// Terminal display width of `s`, ignoring ANSI escape sequences.
+///
+/// Uses [`char_width`] per character so that characters which
+/// `unicode_width` under-reports are counted correctly.
 pub fn display_width(s: &str) -> usize {
     let stripped = strip_ansi(s);
-    UnicodeWidthStr::width(stripped.as_str())
+    stripped.chars().map(char_width).sum()
 }
 
 /// Pad `s` on the right with spaces up to `width` display columns.
@@ -467,7 +499,8 @@ pub fn truncate_visible(s: &str, max_width: usize) -> String {
             }
             continue;
         }
-        let cw = UnicodeWidthStr::width(c.to_string().as_str());
+        // Use `char_width` so compensation matches `display_width`.
+        let cw = char_width(c);
         if used + cw > target {
             break;
         }
@@ -494,4 +527,140 @@ pub fn is_numeric_like(s: &str) -> bool {
     }
     let head = s.split_whitespace().next().unwrap_or("");
     head.parse::<f64>().is_ok()
+}
+
+// ============================================================
+// Tests
+// ============================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use unicode_width::UnicodeWidthStr;
+
+    #[test]
+    fn phi_is_ambiguous_width() {
+        // `unicode_width` 把 `Φ` 算 1（即使 `width_cjk` 也是 1）。
+        // 这是 crate 的行为；`display_width` 通过 `extra_wide` 补偿为 2。
+        let s = "Φ170";
+        assert_eq!(UnicodeWidthStr::width(s), 4, "crate 默认宽度：Φ(1)+170(3)=4");
+        assert_eq!(
+            UnicodeWidthStr::width_cjk(s),
+            4,
+            "crate cjk 宽度同样是 4"
+        );
+        assert_eq!(
+            display_width(s),
+            5,
+            "display_width 补偿后：Φ(2)+170(3)=5"
+        );
+    }
+
+    #[test]
+    fn display_width_uses_cjk_for_phi() {
+        assert_eq!(display_width("Φ"), 2);
+        assert_eq!(display_width("Φ170"), 5);
+        assert_eq!(display_width("Φ8"), 3);
+        // "Φ16  III"：Φ(2) + 1(1) + 6(1) + 空格(1) + 空格(1) + I(1)*3 = 9
+        assert_eq!(display_width("Φ16  III"), 9);
+    }
+
+    #[test]
+    fn display_width_ascii_unchanged() {
+        // ASCII 不受补偿影响。
+        assert_eq!(display_width("abc"), 3);
+        assert_eq!(display_width("170CD1"), 6);
+        assert_eq!(display_width("NUT-1"), 5);
+    }
+
+    #[test]
+    fn display_width_cjk_unchanged() {
+        // 汉字本来就是 2，两种模式一致。
+        assert_eq!(display_width("电杆"), 4);
+        assert_eq!(display_width("名称"), 4);
+        assert_eq!(display_width("电阻值设计定"), 12);
+    }
+
+    #[test]
+    fn display_width_strips_ansi() {
+        // ANSI 转义序列不计入宽度。
+        let colored = "\x1b[93m电杆\x1b[0m";
+        assert_eq!(display_width(colored), 4);
+    }
+
+    #[test]
+    fn phi_rows_align() {
+        // 构造含 Φ 和不含 Φ 的行，验证每行竖线数量一致。
+        let rows = vec![
+            vec!["名称".into(), "规格".into(), "材料".into()],
+            vec!["电杆".into(), "Φ170".into(), "".into()],
+            vec!["横担".into(), "03D103-133".into(), "2II2".into()],
+            vec!["接地线".into(), "Φ8".into(), "".into()],
+            vec!["拉线棒".into(), "03D103-187".into(), "Φ16  III".into()],
+        ];
+        let out = Table::new(rows).style(Style::Boxed).render();
+
+        // 3 列 → 行首 1 + 列间 2 + 行尾 1 = 4 个 `│`。
+        for line in out.lines() {
+            if line.starts_with('│') {
+                let n = line.matches('│').count();
+                assert_eq!(n, 4, "行竖线数量异常: {:?}", line);
+            }
+        }
+    }
+
+    #[test]
+    fn phi_align_matches_ascii_row() {
+        // 含 Φ 的行和不含 Φ 的行，渲染后每列宽度应一致。
+        let rows = vec![
+            vec!["规格".into()],
+            vec!["Φ170".into()],
+            vec!["170C".into()], // 4 个 ASCII 字符，宽度 4
+        ];
+        let out = Table::new(rows).style(Style::Boxed).render();
+
+        let data_lines: Vec<&str> = out
+            .lines()
+            .filter(|l| l.starts_with('│') && !l.contains("规格"))
+            .collect();
+
+        let widths: Vec<usize> = data_lines
+            .iter()
+            .map(|l| {
+                let inner = l.trim_matches('│');
+                display_width(inner)
+            })
+            .collect();
+
+        assert!(
+            widths.windows(2).all(|w| w[0] == w[1]),
+            "含 Φ 的行与 ASCII 行宽度不一致: {:?}",
+            widths
+        );
+    }
+
+    #[test]
+    fn truncate_phi_consistent() {
+        // 允许 6 列，末尾 "..." 占 3 列，前缀最多 3 列。
+        // Φ(2) + "1"(1) = 3 → "Φ1..."，总宽 6。
+        let s = "Φ170CD1XYZ";
+        let t = truncate_visible(s, 6);
+        assert_eq!(t, "Φ1...");
+        assert_eq!(display_width(&t), 6);
+    }
+
+    #[test]
+    fn truncate_ascii_unchanged() {
+        let s = "abcdefghij";
+        let t = truncate_visible(s, 7);
+        assert_eq!(t, "abcd...");
+        assert_eq!(display_width(&t), 7);
+    }
+
+    #[test]
+    fn truncate_no_overflow_returns_original() {
+        let s = "Φ8";
+        let t = truncate_visible(s, 10);
+        assert_eq!(t, "Φ8");
+    }
 }

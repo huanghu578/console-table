@@ -1,6 +1,6 @@
 [package]
 name = "console-table"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 description = "Console table rendering with Unicode/CJK-aware alignment, truncation, and ANSI color support"
 license = "MIT OR Apache-2.0"
@@ -14,7 +14,7 @@ categories = ["command-line-interface", "text-processing"]
 exclude = [".github", "examples/screenshots", "CHANGELOG.md", "sync.bat"]
 
 [dependencies]
-unicode-width = "0.1"
+unicode-width = { version = "0.2.2", features = ["cjk"] }
 ndarray = { version = "0.17.2"}
 
 [dev-dependencies]
