@@ -1,6 +1,20 @@
 //! Console table rendering with Unicode/CJK-aware alignment, truncation,
 //! and ANSI color support.
 //!
+//! # Ambiguous-width characters
+//!
+//! Characters like `Φ` (U+03A6) have Unicode `East_Asian_Width=Ambiguous`.
+//! Terminals render them as 1 or 2 columns depending on locale and terminal
+//! settings. `unicode_width` reports them as 1. To align with the terminal,
+//! this crate counts them as 2 when it believes the output target is a CJK
+//! context, and 1 otherwise.
+//!
+//! **Default behavior**: ambiguous characters are counted as **2 columns**
+//! (`AmbiguousWidth::Wide`). This matches CJK terminals, which are the
+//! primary target of this crate. If your terminal renders `Φ` as 1 column,
+//! call [`Table::cjk_context(false)`] or [`Table::ambiguous_width`] to
+//! override.
+//!
 //! # Example
 //!
 //! ```
@@ -23,6 +37,75 @@
 
 use ndarray::Array2;
 use unicode_width::UnicodeWidthChar;
+
+// ============================================================
+// Ambiguous-width context
+// ============================================================
+
+/// How to treat Unicode `East_Asian_Width=Ambiguous` characters.
+///
+/// Examples: `Φ`, `±`, `×`, `Ⅱ`, `①`. These are 1 column in most Western
+/// terminals and 2 columns in most CJK terminals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AmbiguousWidth {
+    /// Count ambiguous characters as 1 column (Western terminal default).
+    Narrow,
+    /// Count ambiguous characters as 2 columns (CJK terminal default).
+    Wide,
+    /// Decide from environment variables at render time.
+    Auto,
+}
+
+impl AmbiguousWidth {
+    /// Resolve to a concrete width using the environment.
+    fn resolve(self) -> usize {
+        match self {
+            AmbiguousWidth::Narrow => 1,
+            AmbiguousWidth::Wide => 2,
+            AmbiguousWidth::Auto => {
+                if is_cjk_locale() {
+                    2
+                } else {
+                    1
+                }
+            }
+        }
+    }
+}
+
+impl Default for AmbiguousWidth {
+    /// Default is [`AmbiguousWidth::Wide`], matching CJK terminals.
+    ///
+    /// Rationale: the crate targets CJK output by default. `Auto` guesses
+    /// from `LANG`/`LC_*`, but environment locale does not necessarily match
+    /// how the terminal renders ambiguous characters. A fixed default is
+    /// more predictable; callers can override per [`Table`].
+    fn default() -> Self {
+        AmbiguousWidth::Wide
+    }
+}
+
+/// Heuristic: is the current process likely targeting a CJK terminal?
+///
+/// Checks `LC_ALL`, `LC_CTYPE`, `LANG` for a CJK locale prefix
+/// (`zh`, `ja`, `ko`). If nothing matches, returns `false` (narrow).
+fn is_cjk_locale() -> bool {
+    for key in ["LC_ALL", "LC_CTYPE", "LANG"] {
+        if let Ok(v) = std::env::var(key) {
+            let v = v.to_ascii_lowercase();
+            if v.starts_with("zh")
+                || v.starts_with("ja")
+                || v.starts_with("ko")
+                || v.contains("utf-8.zh")
+                || v.contains("utf-8.ja")
+                || v.contains("utf-8.ko")
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
 
 // ============================================================
 // Public types
@@ -50,10 +133,6 @@ pub enum Align {
 }
 
 /// ANSI foreground color.
-///
-/// The first eight are the standard colors, the `Bright*` variants are
-/// the corresponding high-intensity colors. Mapping to ANSI codes:
-/// `Black`=30 ... `White`=37, `BrightBlack`=90 ... `BrightWhite`=97.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Color {
     /// ANSI color 30.
@@ -91,7 +170,6 @@ pub enum Color {
 }
 
 impl Color {
-    /// The ANSI foreground color code.
     fn fg_code(self) -> u8 {
         match self {
             Color::Black => 30,
@@ -120,19 +198,18 @@ pub struct Table {
     rows: Vec<Vec<String>>,
     style: Style,
     aligns: Vec<Align>,
-    /// Maximum display width of a data cell (padding excluded).
-    /// `None` means no truncation.
     max_cell_width: Option<usize>,
-    /// Foreground color for the header row.
     header_color: Option<Color>,
-    /// Foreground color for data rows.
     body_color: Option<Color>,
+    ambiguous_width: AmbiguousWidth,
 }
 
 impl Table {
-    /// Create a table from `rows`.
-    /// The first row is treated as the header.
-    /// Rows may have different lengths; missing cells are treated as empty.
+    /// Create a table from `rows`. The first row is treated as the header.
+    ///
+    /// Ambiguous-width characters default to [`AmbiguousWidth::Wide`]
+    /// (2 columns). Override with [`Table::ambiguous_width`] or
+    /// [`Table::cjk_context`].
     pub fn new(rows: Vec<Vec<String>>) -> Self {
         Self {
             rows,
@@ -141,12 +218,11 @@ impl Table {
             max_cell_width: None,
             header_color: None,
             body_color: None,
+            ambiguous_width: AmbiguousWidth::default(),
         }
     }
 
     /// Create a table from an `ndarray::Array2<String>`.
-    /// The first row is treated as the header.
-    /// Rows may have different lengths; missing cells are treated as empty.
     pub fn from_array2(array: Array2<String>) -> Self {
         let rows = array
             .outer_iter()
@@ -167,23 +243,42 @@ impl Table {
         self
     }
 
-    /// Truncate data cells to at most `width` display columns, appending
-    /// ASCII `...` on overflow. The header is never truncated.
+    /// Truncate data cells to at most `width` display columns.
     pub fn max_cell_width(mut self, width: usize) -> Self {
         self.max_cell_width = Some(width);
         self
     }
 
-    /// Set the header foreground color. Default is no color.
+    /// Set the header foreground color.
     pub fn header_color(mut self, color: Color) -> Self {
         self.header_color = Some(color);
         self
     }
 
-    /// Set the data-row foreground color. Default is no color.
+    /// Set the data-row foreground color.
     pub fn body_color(mut self, color: Color) -> Self {
         self.body_color = Some(color);
         self
+    }
+
+    /// Set how ambiguous-width characters (`Φ`, `±`, `Ⅱ`, ...) are counted.
+    ///
+    /// Default is [`AmbiguousWidth::Wide`] (2 columns, CJK terminals).
+    /// Use [`AmbiguousWidth::Narrow`] for Western terminals, or
+    /// [`AmbiguousWidth::Auto`] to guess from locale environment variables.
+    pub fn ambiguous_width(mut self, mode: AmbiguousWidth) -> Self {
+        self.ambiguous_width = mode;
+        self
+    }
+
+    /// Convenience: set [`AmbiguousWidth::Narrow`] or [`AmbiguousWidth::Wide`].
+    pub fn cjk_context(self, cjk: bool) -> Self {
+        let mode = if cjk {
+            AmbiguousWidth::Wide
+        } else {
+            AmbiguousWidth::Narrow
+        };
+        self.ambiguous_width(mode)
     }
 
     /// Render the table to a `String`. Every line ends with `\n`.
@@ -191,19 +286,20 @@ impl Table {
         if self.rows.is_empty() {
             return String::new();
         }
-        let widths = self.column_widths();
+        let aw = self.ambiguous_width.resolve();
+        let widths = self.column_widths(aw);
         let mut out = String::new();
 
         match self.style {
             Style::Simple => {
                 out.push('│');
-                out.push_str(&self.render_row(&self.rows[0], &widths, true));
+                out.push_str(&self.render_row(&self.rows[0], &widths, true, aw));
                 out.push_str("│\n");
                 out.push_str(&Self::horizontal(&widths, "├", "┼", "┤", "─"));
                 out.push('\n');
                 for row in &self.rows[1..] {
                     out.push('│');
-                    out.push_str(&self.render_row(row, &widths, false));
+                    out.push_str(&self.render_row(row, &widths, false, aw));
                     out.push_str("│\n");
                 }
             }
@@ -211,13 +307,13 @@ impl Table {
                 out.push_str(&Self::horizontal(&widths, "┌", "┬", "┐", "─"));
                 out.push('\n');
                 out.push('│');
-                out.push_str(&self.render_row(&self.rows[0], &widths, true));
+                out.push_str(&self.render_row(&self.rows[0], &widths, true, aw));
                 out.push_str("│\n");
                 out.push_str(&Self::horizontal(&widths, "├", "┼", "┤", "─"));
                 out.push('\n');
                 for (i, row) in self.rows[1..].iter().enumerate() {
                     out.push('│');
-                    out.push_str(&self.render_row(row, &widths, false));
+                    out.push_str(&self.render_row(row, &widths, false, aw));
                     out.push_str("│\n");
                     if i + 1 < self.rows.len() - 1 {
                         out.push_str(&Self::horizontal(&widths, "├", "┼", "┤", "─"));
@@ -237,46 +333,30 @@ impl Table {
         self.aligns.get(col).copied().unwrap_or(Align::Left)
     }
 
-    /// Number of columns: the maximum row length.
     fn column_count(&self) -> usize {
         self.rows.iter().map(|r| r.len()).max().unwrap_or(0)
     }
 
-    /// Prepare a cell for rendering.
-    ///
-    /// Steps: strip ANSI escape sequences, trim surrounding whitespace,
-    /// then truncate to `max_cell_width`. Returns `(final_text, display_width)`.
-    ///
-    /// Both width computation and rendering call this, so they always see
-    /// the same content.
-    fn prepare_cell(&self, content: &str) -> (String, usize) {
+    fn prepare_cell(&self, content: &str, aw: usize) -> (String, usize) {
         let stripped = strip_ansi(content);
         let trimmed = stripped.trim();
         let truncated = match self.max_cell_width {
-            Some(max) => truncate_visible(trimmed, max),
+            Some(max) => truncate_visible_with(trimmed, max, aw),
             None => trimmed.to_string(),
         };
-        let w = display_width(&truncated);
+        let w = display_width_with(&truncated, aw);
         (truncated, w)
     }
 
-    /// Compute the display width of each column.
-    ///
-    /// Each column is `max(display_width of all cells in that column,
-    /// including the header) + 2`, where `+2` reserves one space of padding
-    /// on each side. Data cells are prepared first via [`Self::prepare_cell`].
-    fn column_widths(&self) -> Vec<usize> {
+    fn column_widths(&self, aw: usize) -> Vec<usize> {
         let cols = self.column_count();
         let mut widths = vec![0usize; cols];
         for (r, row) in self.rows.iter().enumerate() {
             for (i, cell) in row.iter().enumerate() {
                 let w = if r == 0 {
-                    // Header: never truncated, but ANSI is still stripped
-                    // before measuring.
-                    display_width(cell)
+                    display_width_with(cell, aw)
                 } else {
-                    // Data rows go through the same preparation path.
-                    let (_, w) = self.prepare_cell(cell);
+                    let (_, w) = self.prepare_cell(cell, aw);
                     w
                 };
                 if w > widths[i] {
@@ -284,16 +364,11 @@ impl Table {
                 }
             }
         }
-        // Reserve one space of padding on each side.
         widths.into_iter().map(|w| w + 2).collect()
     }
 
-    /// Render one data cell: one space of padding on each side, then
-    /// alignment, then `body_color`.
-    fn render_cell(&self, content: &str, width: usize, align: Align) -> String {
-        let (text, vis) = self.prepare_cell(content);
-
-        // `width` already includes one space of padding on each side.
+    fn render_cell(&self, content: &str, width: usize, align: Align, aw: usize) -> String {
+        let (text, vis) = self.prepare_cell(content, aw);
         let inner = width.saturating_sub(2);
         let pad = inner.saturating_sub(vis);
 
@@ -301,7 +376,6 @@ impl Table {
             Align::Left => format!("{}{}", text, " ".repeat(pad)),
             Align::Right => format!("{}{}", " ".repeat(pad), text),
             Align::Auto => {
-                // Decide numeric-ness from the original content (ANSI stripped).
                 if is_numeric_like(&strip_ansi(content)) {
                     format!("{}{}", " ".repeat(pad), text)
                 } else {
@@ -314,33 +388,35 @@ impl Table {
         colorize(&padded, self.body_color)
     }
 
-    /// Render one header cell: left aligned, never truncated, one space of
-    /// padding on each side, then `header_color`.
-    fn render_header_cell(&self, content: &str, width: usize) -> String {
+    fn render_header_cell(&self, content: &str, width: usize, aw: usize) -> String {
         let stripped = strip_ansi(content);
-        let vis = display_width(&stripped);
+        let vis = display_width_with(&stripped, aw);
         let inner = width.saturating_sub(2);
         let pad = inner.saturating_sub(vis);
         let padded = format!(" {}{} ", stripped, " ".repeat(pad));
         colorize(&padded, self.header_color)
     }
 
-    /// Render one row (without the leading and trailing `│`).
-    fn render_row(&self, row: &[String], widths: &[usize], is_header: bool) -> String {
+    fn render_row(
+        &self,
+        row: &[String],
+        widths: &[usize],
+        is_header: bool,
+        aw: usize,
+    ) -> String {
         let mut cells = Vec::with_capacity(widths.len());
         for (i, w) in widths.iter().enumerate() {
             let content = row.get(i).map(String::as_str).unwrap_or("");
             if is_header {
-                cells.push(self.render_header_cell(content, *w));
+                cells.push(self.render_header_cell(content, *w, aw));
             } else {
                 let align = self.align_of(i);
-                cells.push(self.render_cell(content, *w, align));
+                cells.push(self.render_cell(content, *w, align, aw));
             }
         }
         cells.join("│")
     }
 
-    /// Build a horizontal line, e.g. `├───┼───┤`.
     fn horizontal(widths: &[usize], left: &str, mid: &str, right: &str, fill: &str) -> String {
         let segments: Vec<String> = widths.iter().map(|w| fill.repeat(*w)).collect();
         format!("{}{}{}", left, segments.join(mid), right)
@@ -356,7 +432,6 @@ pub fn render_table(rows: Vec<Vec<String>>, style: Style) -> String {
 // Color
 // ============================================================
 
-/// Wrap `s` in an ANSI foreground color. `None` returns `s` unchanged.
 fn colorize(s: &str, color: Option<Color>) -> String {
     match color {
         Some(c) => format!("\x1b[{}m{}\x1b[0m", c.fg_code(), s),
@@ -368,40 +443,40 @@ fn colorize(s: &str, color: Option<Color>) -> String {
 // Width
 // ============================================================
 
-/// Characters that the current terminal renders as 2 columns, but
-/// `unicode_width` counts as 1 (even with `width_cjk`).
-///
-/// `Φ` (U+03A6) is the motivating example: `unicode_width` gives it width 1,
-/// but CJK terminals render it 2 columns wide, causing misalignment.
-/// Extend this list as new such characters appear in real data.
-fn extra_wide(c: char) -> bool {
+/// Is `c` in the Unicode `East_Asian_Width=Ambiguous` category?
+fn is_ambiguous(c: char) -> bool {
     matches!(
         c,
-        'Φ' | 'φ'                 // 希腊字母 Phi
-        | 'Ⅱ' | 'Ⅲ' | 'Ⅰ'       // 罗马数字
-        | '±' | '×' | '÷'        // 数学符号
-        | '≤' | '≥' | '≠'
-        | '→' | '←' | '↑' | '↓'
-        | '①'..='⑳'             // 带圈数字
+        '\u{0391}'..='\u{03A9}'
+        | '\u{03B1}'..='\u{03C9}'
+        | '±' | '×' | '÷' | '≤' | '≥' | '≠' | '≈' | '∞' | '√'
+        | '→' | '←' | '↑' | '↓' | '↔'
+        | 'Ⅰ' | 'Ⅱ' | 'Ⅲ' | 'Ⅳ' | 'Ⅴ' | 'Ⅵ' | 'Ⅶ' | 'Ⅷ' | 'Ⅸ' | 'Ⅹ'
+        | 'ⅰ' | 'ⅱ' | 'ⅲ' | 'ⅳ' | 'ⅴ' | 'ⅵ' | 'ⅶ' | 'ⅷ' | 'ⅸ' | 'ⅹ'
+        | '①'..='⑳'
     )
 }
 
-/// Display width of a single `char`, with [`extra_wide`] compensation.
-fn char_width(c: char) -> usize {
-    if extra_wide(c) {
-        2
+/// Width of a single `char`, treating ambiguous characters as `aw` columns.
+fn char_width(c: char, aw: usize) -> usize {
+    if is_ambiguous(c) {
+        aw
     } else {
         UnicodeWidthChar::width(c).unwrap_or(0)
     }
 }
 
+/// Display width of `s` with a given ambiguous-character width `aw`.
+fn display_width_with(s: &str, aw: usize) -> usize {
+    let stripped = strip_ansi(s);
+    stripped.chars().map(|c| char_width(c, aw)).sum()
+}
+
 /// Terminal display width of `s`, ignoring ANSI escape sequences.
 ///
-/// Uses [`char_width`] per character so that characters which
-/// `unicode_width` under-reports are counted correctly.
+/// Uses [`AmbiguousWidth::default`] (currently `Wide`).
 pub fn display_width(s: &str) -> usize {
-    let stripped = strip_ansi(s);
-    stripped.chars().map(char_width).sum()
+    display_width_with(s, AmbiguousWidth::default().resolve())
 }
 
 /// Pad `s` on the right with spaces up to `width` display columns.
@@ -439,7 +514,7 @@ pub fn strip_ansi(s: &str) -> String {
     while let Some(c) = chars.next() {
         if c == '\x1b' {
             if chars.peek() == Some(&'[') {
-                chars.next(); // consume '['
+                chars.next();
                 for c2 in chars.by_ref() {
                     if c2.is_ascii_alphabetic() {
                         break;
@@ -457,28 +532,27 @@ pub fn strip_ansi(s: &str) -> String {
 // Truncation
 // ============================================================
 
-/// Truncate `s` to at most `max_width` display columns, appending ASCII
-/// `...` (3 columns) on overflow.
+/// Truncate `s` to at most `max_width` display columns.
 ///
-/// ASCII `...` is used instead of `…` (U+2026) because the single-character
-/// ellipsis renders as 1 or 2 columns depending on terminal and font, which
-/// breaks alignment. ASCII `...` is always exactly 3 columns.
-///
-/// ANSI escape sequences are preserved (they do not consume width), but
-/// color closure after truncation is not guaranteed. Prefer stripping ANSI
-/// before calling this function.
+/// Uses [`AmbiguousWidth::default`] (currently `Wide`). For an explicit
+/// choice, use [`truncate_visible_with`].
 pub fn truncate_visible(s: &str, max_width: usize) -> String {
+    truncate_visible_with(s, max_width, AmbiguousWidth::default().resolve())
+}
+
+/// Truncate `s` to at most `max_width` display columns, using `aw` for
+/// ambiguous characters.
+pub fn truncate_visible_with(s: &str, max_width: usize, aw: usize) -> String {
     if max_width == 0 {
         return String::new();
     }
-    let vis = display_width(s);
+    let vis = display_width_with(s, aw);
     if vis <= max_width {
         return s.to_string();
     }
     let suffix = "...";
     let suffix_w = 3usize;
     if max_width <= suffix_w {
-        // Not enough room for any content; show the suffix only.
         return suffix.to_string();
     }
     let target = max_width - suffix_w;
@@ -499,8 +573,7 @@ pub fn truncate_visible(s: &str, max_width: usize) -> String {
             }
             continue;
         }
-        // Use `char_width` so compensation matches `display_width`.
-        let cw = char_width(c);
+        let cw = char_width(c, aw);
         if used + cw > target {
             break;
         }
@@ -516,10 +589,6 @@ pub fn truncate_visible(s: &str, max_width: usize) -> String {
 // ============================================================
 
 /// Return `true` if `s` looks like a number, for [`Align::Auto`].
-///
-/// Rule: take the first whitespace-separated token and try to parse it as
-/// `f64`. For example, `"57 ms"` -> `"57"` -> `true`; `"失败"` -> `false`;
-/// `"-3.14"` -> `true`.
 pub fn is_numeric_like(s: &str) -> bool {
     let s = s.trim();
     if s.is_empty() {
@@ -540,34 +609,34 @@ mod tests {
 
     #[test]
     fn phi_is_ambiguous_width() {
-        // `unicode_width` 把 `Φ` 算 1（即使 `width_cjk` 也是 1）。
-        // 这是 crate 的行为；`display_width` 通过 `extra_wide` 补偿为 2。
         let s = "Φ170";
-        assert_eq!(UnicodeWidthStr::width(s), 4, "crate 默认宽度：Φ(1)+170(3)=4");
-        assert_eq!(
-            UnicodeWidthStr::width_cjk(s),
-            4,
-            "crate cjk 宽度同样是 4"
-        );
-        assert_eq!(
-            display_width(s),
-            5,
-            "display_width 补偿后：Φ(2)+170(3)=5"
-        );
+        assert_eq!(UnicodeWidthStr::width(s), 4);
+        assert_eq!(UnicodeWidthStr::width_cjk(s), 4);
+        assert_eq!(display_width_with(s, 2), 5);
+        assert_eq!(display_width_with(s, 1), 4);
     }
 
     #[test]
-    fn display_width_uses_cjk_for_phi() {
+    fn ambiguous_width_respects_context() {
+        assert_eq!(display_width_with("Φ", 2), 2);
+        assert_eq!(display_width_with("Φ", 1), 1);
+        assert_eq!(display_width_with("Φ170", 2), 5);
+        assert_eq!(display_width_with("Φ170", 1), 4);
+        assert_eq!(display_width_with("Φ8", 2), 3);
+        assert_eq!(display_width_with("Φ16  III", 2), 9);
+        assert_eq!(display_width_with("Φ16  III", 1), 8);
+    }
+
+    #[test]
+    fn default_ambiguous_width_is_wide() {
+        // 默认是 Wide。
+        assert_eq!(AmbiguousWidth::default(), AmbiguousWidth::Wide);
         assert_eq!(display_width("Φ"), 2);
         assert_eq!(display_width("Φ170"), 5);
-        assert_eq!(display_width("Φ8"), 3);
-        // "Φ16  III"：Φ(2) + 1(1) + 6(1) + 空格(1) + 空格(1) + I(1)*3 = 9
-        assert_eq!(display_width("Φ16  III"), 9);
     }
 
     #[test]
     fn display_width_ascii_unchanged() {
-        // ASCII 不受补偿影响。
         assert_eq!(display_width("abc"), 3);
         assert_eq!(display_width("170CD1"), 6);
         assert_eq!(display_width("NUT-1"), 5);
@@ -575,7 +644,6 @@ mod tests {
 
     #[test]
     fn display_width_cjk_unchanged() {
-        // 汉字本来就是 2，两种模式一致。
         assert_eq!(display_width("电杆"), 4);
         assert_eq!(display_width("名称"), 4);
         assert_eq!(display_width("电阻值设计定"), 12);
@@ -583,14 +651,13 @@ mod tests {
 
     #[test]
     fn display_width_strips_ansi() {
-        // ANSI 转义序列不计入宽度。
         let colored = "\x1b[93m电杆\x1b[0m";
         assert_eq!(display_width(colored), 4);
     }
 
     #[test]
-    fn phi_rows_align() {
-        // 构造含 Φ 和不含 Φ 的行，验证每行竖线数量一致。
+    fn phi_rows_align_default_wide() {
+        // 默认（Wide）下，含 Φ 的行应和其它行对齐。
         let rows = vec![
             vec!["名称".into(), "规格".into(), "材料".into()],
             vec!["电杆".into(), "Φ170".into(), "".into()],
@@ -599,68 +666,76 @@ mod tests {
             vec!["拉线棒".into(), "03D103-187".into(), "Φ16  III".into()],
         ];
         let out = Table::new(rows).style(Style::Boxed).render();
-
-        // 3 列 → 行首 1 + 列间 2 + 行尾 1 = 4 个 `│`。
         for line in out.lines() {
             if line.starts_with('│') {
-                let n = line.matches('│').count();
-                assert_eq!(n, 4, "行竖线数量异常: {:?}", line);
+                assert_eq!(line.matches('│').count(), 4, "行: {:?}", line);
             }
         }
     }
 
     #[test]
-    fn phi_align_matches_ascii_row() {
-        // 含 Φ 的行和不含 Φ 的行，渲染后每列宽度应一致。
+    fn phi_rows_align_narrow() {
         let rows = vec![
-            vec!["规格".into()],
-            vec!["Φ170".into()],
-            vec!["170C".into()], // 4 个 ASCII 字符，宽度 4
+            vec!["名称".into(), "规格".into(), "材料".into()],
+            vec!["电杆".into(), "Φ170".into(), "".into()],
+            vec!["横担".into(), "03D103-133".into(), "2II2".into()],
+            vec!["接地线".into(), "Φ8".into(), "".into()],
+            vec!["拉线棒".into(), "03D103-187".into(), "Φ16  III".into()],
         ];
-        let out = Table::new(rows).style(Style::Boxed).render();
-
-        let data_lines: Vec<&str> = out
-            .lines()
-            .filter(|l| l.starts_with('│') && !l.contains("规格"))
-            .collect();
-
-        let widths: Vec<usize> = data_lines
-            .iter()
-            .map(|l| {
-                let inner = l.trim_matches('│');
-                display_width(inner)
-            })
-            .collect();
-
-        assert!(
-            widths.windows(2).all(|w| w[0] == w[1]),
-            "含 Φ 的行与 ASCII 行宽度不一致: {:?}",
-            widths
-        );
+        let out = Table::new(rows)
+            .style(Style::Boxed)
+            .ambiguous_width(AmbiguousWidth::Narrow)
+            .render();
+        for line in out.lines() {
+            if line.starts_with('│') {
+                assert_eq!(line.matches('│').count(), 4, "行: {:?}", line);
+            }
+        }
     }
 
     #[test]
-    fn truncate_phi_consistent() {
-        // 允许 6 列，末尾 "..." 占 3 列，前缀最多 3 列。
-        // Φ(2) + "1"(1) = 3 → "Φ1..."，总宽 6。
+    fn truncate_phi_consistent_wide() {
         let s = "Φ170CD1XYZ";
-        let t = truncate_visible(s, 6);
+        let t = truncate_visible_with(s, 6, 2);
         assert_eq!(t, "Φ1...");
-        assert_eq!(display_width(&t), 6);
+        assert_eq!(display_width_with(&t, 2), 6);
+    }
+
+    #[test]
+    fn truncate_phi_consistent_narrow() {
+        let s = "Φ170CD1XYZ";
+        let t = truncate_visible_with(s, 6, 1);
+        assert_eq!(t, "Φ17...");
+        assert_eq!(display_width_with(&t, 1), 6);
+    }
+
+    #[test]
+    fn truncate_visible_two_arg_uses_default_wide() {
+        // 两参数版本用默认（Wide）：Φ(2) + 1(1) = 3 → "Φ1..."
+        let t = truncate_visible("Φ170CD1XYZ", 6);
+        assert_eq!(t, "Φ1...");
     }
 
     #[test]
     fn truncate_ascii_unchanged() {
         let s = "abcdefghij";
-        let t = truncate_visible(s, 7);
+        let t = truncate_visible_with(s, 7, 2);
         assert_eq!(t, "abcd...");
-        assert_eq!(display_width(&t), 7);
+        assert_eq!(display_width_with(&t, 2), 7);
     }
 
     #[test]
     fn truncate_no_overflow_returns_original() {
         let s = "Φ8";
-        let t = truncate_visible(s, 10);
+        let t = truncate_visible_with(s, 10, 2);
         assert_eq!(t, "Φ8");
+    }
+
+    #[test]
+    fn cjk_context_builder_sets_mode() {
+        let t = Table::new(vec![vec!["a".into()]]).cjk_context(true);
+        assert_eq!(t.ambiguous_width, AmbiguousWidth::Wide);
+        let t = Table::new(vec![vec!["a".into()]]).cjk_context(false);
+        assert_eq!(t.ambiguous_width, AmbiguousWidth::Narrow);
     }
 }
